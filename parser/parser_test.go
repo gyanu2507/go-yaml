@@ -769,6 +769,24 @@ a:
 d: e
 `,
 		},
+		{
+			`
+a: 1
+config: &config
+`,
+			`
+a: 1
+config: &config
+`,
+		},
+		{
+			`
+- &item
+`,
+			`
+- &item
+`,
+		},
 	}
 
 	for _, test := range tests {
