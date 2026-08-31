@@ -787,6 +787,28 @@ config: &config
 - &item
 `,
 		},
+		{
+			`
+- &anchor
+- b
+`,
+			`
+- &anchor
+- b
+`,
+		},
+		{
+			`
+a:
+  - &anchor
+b: c
+`,
+			`
+a:
+  - &anchor
+b: c
+`,
+		},
 	}
 
 	for _, test := range tests {
