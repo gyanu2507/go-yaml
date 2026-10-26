@@ -1766,6 +1766,96 @@ items:
 	})
 }
 
+func TestDecodeMergeKeyExplicitWins(t *testing.T) {
+	// Existing keys must not be overwritten by a merge (#964).
+	src := []byte(`
+b: &b {k: 1}
+c: {k: 3, <<: *b}
+`)
+	j, err := yaml.YAMLToJSON(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(j), `"k"`) != 2 { // one under b, one under c
+		t.Fatalf("YAMLToJSON should write each key once: %s", j)
+	}
+	if !strings.Contains(string(j), `"k": 3`) && !strings.Contains(string(j), `"k":3`) {
+		t.Fatalf("YAMLToJSON should keep explicit k=3: %s", j)
+	}
+
+	var m map[string]any
+	if err := yaml.Unmarshal(src, &m); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := m["c"].(map[string]any)
+	if fmt.Sprint(c["k"]) != "3" {
+		t.Fatalf("map decode: got %#v", m["c"])
+	}
+
+	var s struct {
+		C struct {
+			K int `yaml:"k"`
+		} `yaml:"c"`
+	}
+	if err := yaml.Unmarshal(src, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.C.K != 3 {
+		t.Fatalf("struct decode: got %d", s.C.K)
+	}
+
+	src2 := []byte(`
+b: &b {k: 1}
+c: {<<: *b, k: 3}
+`)
+	var m2 map[string]any
+	if err := yaml.Unmarshal(src2, &m2); err != nil {
+		t.Fatal(err)
+	}
+	c2, _ := m2["c"].(map[string]any)
+	if fmt.Sprint(c2["k"]) != "3" {
+		t.Fatalf("explicit after merge: got %#v", m2["c"])
+	}
+}
+
+func TestDecodeMergeKeyAliasAtDefinition(t *testing.T) {
+	src := []byte(`
+x: &x 1
+m: &m {v: *x}
+y: &x 2
+n: {<<: *m}
+`)
+	var v map[string]any
+	if err := yaml.Unmarshal(src, &v); err != nil {
+		t.Fatal(err)
+	}
+	n, _ := v["n"].(map[string]any)
+	if fmt.Sprint(n["v"]) != "1" {
+		t.Fatalf("merge should keep definition-site alias: %#v", v)
+	}
+}
+
+func TestDecodeMergeKeyNestedLinear(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("m0: &m0 {k0: 0}\n")
+	const levels = 12
+	for i := 1; i <= levels; i++ {
+		fmt.Fprintf(&b, "m%d: &m%d {k%d: %d, <<: [*m%d, *m%d, *m%d]}\n", i, i, i, i, i-1, i-1, i-1)
+	}
+	var v map[string]any
+	start := time.Now()
+	if err := yaml.Unmarshal([]byte(b.String()), &v); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("nested merges took %s; expected near-linear time", elapsed)
+	}
+	last, _ := v[fmt.Sprintf("m%d", levels)].(map[string]any)
+	if last == nil || fmt.Sprint(last["k0"]) != "0" || fmt.Sprint(last[fmt.Sprintf("k%d", levels)]) != fmt.Sprint(levels) {
+		t.Fatalf("unexpected last map: %#v", last)
+	}
+}
+
 func TestDecoder_Inline(t *testing.T) {
 	type Base struct {
 		A int
