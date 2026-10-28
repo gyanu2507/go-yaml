@@ -188,7 +188,10 @@ func (d *Decoder) decodedMergeMap(value ast.Node, mapType reflect.Type) (reflect
 	}
 }
 
-func mergeDecodedMapInto(dst map[string]interface{}, src interface{}) {
+// mergeDecodedMapInto copies src into dst without overwriting existing keys.
+// Returns false when src is not a recognized mapping form so the caller can
+// fall back to walking the AST (typed maps and structs are handled via reflect).
+func mergeDecodedMapInto(dst map[string]interface{}, src interface{}) bool {
 	switch s := src.(type) {
 	case map[string]interface{}:
 		for k, v := range s {
@@ -196,6 +199,7 @@ func mergeDecodedMapInto(dst map[string]interface{}, src interface{}) {
 				dst[k] = v
 			}
 		}
+		return true
 	case MapSlice:
 		for _, item := range s {
 			k := fmt.Sprint(item.Key)
@@ -203,34 +207,81 @@ func mergeDecodedMapInto(dst map[string]interface{}, src interface{}) {
 				dst[k] = item.Value
 			}
 		}
+		return true
 	}
+	rv := reflect.ValueOf(src)
+	for rv.Kind() == reflect.Interface || rv.Kind() == reflect.Ptr {
+		if !rv.IsValid() || rv.IsNil() {
+			return false
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Map {
+		return false
+	}
+	iter := rv.MapRange()
+	for iter.Next() {
+		k := fmt.Sprint(iter.Key().Interface())
+		if _, exists := dst[k]; !exists {
+			dst[k] = iter.Value().Interface()
+		}
+	}
+	return true
 }
 
-func orderedMapIndex(m MapSlice, key string) int {
+func orderedMapIndexByString(m MapSlice, key string) int {
 	for i, item := range m {
-		if fmt.Sprint(item.Key) == key {
+		if sk, ok := item.Key.(string); ok && sk == key {
 			return i
 		}
 	}
 	return -1
 }
 
-func mergeDecodedMapIntoOrdered(dst *MapSlice, src interface{}) {
+func orderedMapHasKey(m MapSlice, key interface{}) bool {
+	for _, item := range m {
+		if reflect.DeepEqual(item.Key, key) {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeDecodedMapIntoOrdered(dst *MapSlice, src interface{}) bool {
 	switch s := src.(type) {
 	case map[string]interface{}:
 		for k, v := range s {
-			if orderedMapIndex(*dst, k) < 0 {
+			if !orderedMapHasKey(*dst, k) {
 				*dst = append(*dst, MapItem{Key: k, Value: v})
 			}
 		}
+		return true
 	case MapSlice:
 		for _, item := range s {
-			k := fmt.Sprint(item.Key)
-			if orderedMapIndex(*dst, k) < 0 {
-				*dst = append(*dst, MapItem{Key: k, Value: item.Value})
+			if !orderedMapHasKey(*dst, item.Key) {
+				*dst = append(*dst, MapItem{Key: item.Key, Value: item.Value})
 			}
 		}
+		return true
 	}
+	rv := reflect.ValueOf(src)
+	for rv.Kind() == reflect.Interface || rv.Kind() == reflect.Ptr {
+		if !rv.IsValid() || rv.IsNil() {
+			return false
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Map {
+		return false
+	}
+	iter := rv.MapRange()
+	for iter.Next() {
+		k := iter.Key().Interface()
+		if !orderedMapHasKey(*dst, k) {
+			*dst = append(*dst, MapItem{Key: k, Value: iter.Value().Interface()})
+		}
+	}
+	return true
 }
 
 // mergeValueIntoMap applies a merge-key value. Existing keys in m win (YAML merge
@@ -247,8 +298,9 @@ func (d *Decoder) mergeValueIntoMap(ctx context.Context, value ast.Node, m map[s
 	case *ast.AliasNode:
 		name := n.Value.GetToken().Value
 		if v, ok := d.anchorValueMap[name]; ok && v.IsValid() {
-			mergeDecodedMapInto(m, v.Interface())
-			return nil
+			if mergeDecodedMapInto(m, v.Interface()) {
+				return nil
+			}
 		}
 		node := d.anchorNodeMap[name]
 		if node == nil {
@@ -316,8 +368,9 @@ func (d *Decoder) mergeValueIntoOrderedMap(ctx context.Context, value ast.Node, 
 	case *ast.AliasNode:
 		name := n.Value.GetToken().Value
 		if v, ok := d.anchorValueMap[name]; ok && v.IsValid() {
-			mergeDecodedMapIntoOrdered(m, v.Interface())
-			return nil
+			if mergeDecodedMapIntoOrdered(m, v.Interface()) {
+				return nil
+			}
 		}
 		node := d.anchorNodeMap[name]
 		if node == nil {
@@ -362,7 +415,7 @@ func (d *Decoder) mergeValueIntoOrderedMap(ctx context.Context, value ast.Node, 
 		if err != nil {
 			return err
 		}
-		if orderedMapIndex(*m, key) >= 0 {
+		if orderedMapIndexByString(*m, key) >= 0 {
 			continue
 		}
 		v, err := d.nodeToValue(ctx, kv.Value)
@@ -430,7 +483,7 @@ func (d *Decoder) setToOrderedMapValue(ctx context.Context, node ast.Node, m *Ma
 		if err != nil {
 			return err
 		}
-		if idx := orderedMapIndex(*m, key); idx >= 0 {
+		if idx := orderedMapIndexByString(*m, key); idx >= 0 {
 			(*m)[idx].Value = value
 		} else {
 			*m = append(*m, MapItem{Key: key, Value: value})
@@ -1906,8 +1959,7 @@ func (d *Decoder) decodeMapSlice(ctx context.Context, dst *MapSlice, src ast.Nod
 				return err
 			}
 			for _, v := range m {
-				k := fmt.Sprint(v.Key)
-				if orderedMapIndex(mapSlice, k) >= 0 {
+				if orderedMapHasKey(mapSlice, v.Key) {
 					continue
 				}
 				mapSlice = append(mapSlice, v)
@@ -1925,11 +1977,9 @@ func (d *Decoder) decodeMapSlice(ctx context.Context, dst *MapSlice, src ast.Nod
 		if err != nil {
 			return err
 		}
-		if idx := orderedMapIndex(mapSlice, fmt.Sprint(k)); idx >= 0 {
-			mapSlice[idx].Value = v
-		} else {
-			mapSlice = append(mapSlice, MapItem{Key: k, Value: v})
-		}
+		// Keep typed key identity (e.g. uint64(1) vs string("1") under
+		// AllowDuplicateMapKey). Do not collapse by string form.
+		mapSlice = append(mapSlice, MapItem{Key: k, Value: v})
 	}
 	*dst = mapSlice
 	return nil

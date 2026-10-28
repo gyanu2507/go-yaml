@@ -1835,6 +1835,37 @@ n: {<<: *m}
 	}
 }
 
+func TestDecodeMergeKeyTypedAnchorIntoInterface(t *testing.T) {
+	// Cached typed anchors must still populate a generic merge target (#972 review).
+	src := []byte("base: &base {k: 1}\ncopy: {<<: *base}\n")
+	var v struct {
+		Base map[string]int `yaml:"base"`
+		Copy any            `yaml:"copy"`
+	}
+	if err := yaml.Unmarshal(src, &v); err != nil {
+		t.Fatal(err)
+	}
+	c, ok := v.Copy.(map[string]any)
+	if !ok || fmt.Sprint(c["k"]) != "1" {
+		t.Fatalf("typed anchor merge into interface{}: %#v", v.Copy)
+	}
+}
+
+func TestDecodeOrderedDuplicateTextualKeys(t *testing.T) {
+	// Distinct typed keys that stringify the same must stay separate.
+	src := []byte("1: integer\n\"1\": string\n")
+	var rows yaml.MapSlice
+	if err := yaml.UnmarshalWithOptions(src, &rows, yaml.AllowDuplicateMapKey()); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 MapSlice entries, got %#v", rows)
+	}
+	if reflect.DeepEqual(rows[0].Key, rows[1].Key) {
+		t.Fatalf("keys collapsed: %#v", rows)
+	}
+}
+
 func TestDecodeMergeKeyNestedLinear(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("m0: &m0 {k0: 0}\n")
